@@ -38,12 +38,16 @@ const connectToWhatsApp = async (phoneNumber) => {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const statusCode = lastDisconnect.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
             console.log(`Koneksi untuk ${phoneNumber} ditutup karena:`, lastDisconnect.error, `, mencoba menghubungkan kembali:`, shouldReconnect);
+
             if (shouldReconnect) {
-                connectToWhatsApp(phoneNumber);
+                console.log(`Mencoba menghubungkan kembali untuk ${phoneNumber} dalam 5 detik...`);
+                setTimeout(() => connectToWhatsApp(phoneNumber), 5000);
             } else {
-                console.log(`Koneksi untuk ${phoneNumber} ditutup permanen, hapus folder session jika ingin scan ulang.`);
+                console.log(`Koneksi untuk ${phoneNumber} ditutup permanen (Logged Out). Hapus folder session jika ingin scan ulang.`);
             }
         } else if (connection === 'open') {
             console.log(`Koneksi berhasil terhubung untuk nomor: ${phoneNumber}`);
