@@ -5,6 +5,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal');
 
 const SESSIONS_DIR = './sessions/';
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -16,33 +17,55 @@ const conversationPairs = JSON.parse(fs.readFileSync('./messages.json'));
 const activeSessions = {};
 let pendingReplies = [];
 
-const connectToWhatsApp = async (number) => {
-    const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR + number);
+const connectToWhatsApp = (number) => {
+    return new Promise(async (resolve, reject) => {
+        const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR + number);
 
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' })
-    });
+        const sock = makeWASocket({
+            auth: state,
+            logger: pino({ level: 'silent' })
+        });
 
-    sock.ev.on('creds.update', saveCreds);
+        let connectionOpened = false;
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') {
-            console.log(`[INFO] Koneksi berhasil untuk nomor: ${number}`);
-            activeSessions[number] = sock;
-        } else if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log(`[WARNING] Koneksi ditutup untuk ${number}. Alasan: ${lastDisconnect.error}. Rekoneksi: ${shouldReconnect}`);
-            delete activeSessions[number];
-            if (shouldReconnect) {
-                setTimeout(() => connectToWhatsApp(number), 5000);
-            } else {
-                console.error(`[FATAL] Gagal terhubung untuk ${number}. Hapus folder sesi dan scan ulang.`);
-                fs.rmSync(SESSIONS_DIR + number, { recursive: true, force: true });
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                console.log(`\n[ACTION] Silakan scan QR Code untuk nomor ${number}:`);
+                qrcode.generate(qr, { small: true });
             }
-        }
+
+            if (connection === 'open') {
+                if (!connectionOpened) {
+                    console.log(`[SUCCESS] Koneksi berhasil untuk nomor: ${number}`);
+                    activeSessions[number] = sock;
+                    connectionOpened = true;
+                    resolve(sock);
+                }
+            } else if (connection === 'close') {
+                const statusCode = lastDisconnect.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                
+                if (activeSessions[number]) {
+                    console.log(`[WARNING] Koneksi ditutup untuk ${number}. Rekoneksi: ${shouldReconnect}`);
+                    delete activeSessions[number];
+                }
+
+                if (shouldReconnect) {
+                    // Coba rekoneksi tanpa menghentikan promise
+                    setTimeout(() => connectToWhatsApp(number).catch(() => {}), 5000);
+                } else {
+                    console.error(`[FATAL] Gagal terhubung untuk ${number}. Hapus folder sesi dan scan ulang.`);
+                    fs.rmSync(SESSIONS_DIR + number, { recursive: true, force: true });
+                    if (!connectionOpened) {
+                        reject(new Error(`Logged out for ${number}`));
+                    }
+                }
+            }
+        });
     });
 };
 
@@ -88,7 +111,7 @@ const processPendingReplies = async () => {
 const initiateConversation = async () => {
     const sessionKeys = Object.keys(activeSessions);
     if (sessionKeys.length < 2) {
-        console.log('[SCHEDULER] Menunggu setidaknya 2 sesi aktif untuk memulai...');
+        console.log(`[SCHEDULER] Menunggu minimal 2 sesi aktif... Sesi aktif saat ini: ${sessionKeys.length}`);
         return;
     }
 
@@ -129,17 +152,19 @@ const initiateConversation = async () => {
 };
 
 const run = async () => {
-    console.log('[SYSTEM] Memulai inisialisasi semua sesi...');
-    for (const number of numbers) {
-        await connectToWhatsApp(number);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-    }
+    console.log('[SYSTEM] Memulai penjadwal percakapan...');
+    startScheduler();
 
-    console.log('[SYSTEM] Inisialisasi selesai. Menunggu koneksi stabil...');
-    setTimeout(() => {
-        console.log('[SYSTEM] Memulai penjadwal percakapan otomatis.');
-        startScheduler();
-    }, 20000);
+    console.log('[SYSTEM] Memulai inisialisasi semua sesi secara paralel...');
+    const connectionPromises = numbers.map(number => 
+        connectToWhatsApp(number).catch(err => 
+            console.error(`[INIT ERROR] Gagal inisialisasi untuk ${number}: ${err.message}`)
+        )
+    );
+
+    await Promise.allSettled(connectionPromises);
+
+    console.log('[SYSTEM] Semua upaya koneksi awal telah selesai. Bot berjalan dengan sesi yang aktif.');
 };
 
 run();
