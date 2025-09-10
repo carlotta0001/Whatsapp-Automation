@@ -1,11 +1,11 @@
 const {
     default: makeWASocket,
     useMultiFileAuthState,
-    DisconnectReason
+    DisconnectReason,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal');
 
 const SESSIONS_DIR = './sessions/';
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -14,6 +14,7 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 
 const numbers = JSON.parse(fs.readFileSync('./numbers.json'));
 const conversationPairs = JSON.parse(fs.readFileSync('./messages.json'));
+
 const activeSessions = {};
 let pendingReplies = [];
 
@@ -23,20 +24,30 @@ const connectToWhatsApp = (number) => {
 
         const sock = makeWASocket({
             auth: state,
-            logger: pino({ level: 'silent' })
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false,
+            browser: Browsers.macOS('Desktop')
         });
+
+        if (!sock.authState.creds.registered) {
+            const phoneNumber = number.replace(/[^0-9]/g, '');
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(phoneNumber);
+                    console.log(`[PAIRING CODE] Kode untuk ${number}: ${code.match(/.{1,4}/g).join('-')}`);
+                } catch (error) {
+                    console.error(`[ERROR] Gagal meminta pairing code untuk ${number}:`, error);
+                    reject(error);
+                }
+            }, 3000);
+        }
 
         let connectionOpened = false;
 
         sock.ev.on('creds.update', saveCreds);
 
         sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr) {
-                console.log(`\n[ACTION] Silakan scan QR Code untuk nomor ${number}:`);
-                qrcode.generate(qr, { small: true });
-            }
+            const { connection, lastDisconnect } = update;
 
             if (connection === 'open') {
                 if (!connectionOpened) {
@@ -45,20 +56,20 @@ const connectToWhatsApp = (number) => {
                     connectionOpened = true;
                     resolve(sock);
                 }
-            } else if (connection === 'close') {
+            } 
+            else if (connection === 'close') {
                 const statusCode = lastDisconnect.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 
                 if (activeSessions[number]) {
-                    console.log(`[WARNING] Koneksi ditutup untuk ${number}. Rekoneksi: ${shouldReconnect}`);
+                    console.log(`[WARNING] Koneksi ditutup untuk ${number}. Mencoba menyambung kembali...`);
                     delete activeSessions[number];
                 }
 
                 if (shouldReconnect) {
-                    // Coba rekoneksi tanpa menghentikan promise
                     setTimeout(() => connectToWhatsApp(number).catch(() => {}), 5000);
                 } else {
-                    console.error(`[FATAL] Gagal terhubung untuk ${number}. Hapus folder sesi dan scan ulang.`);
+                    console.error(`[FATAL] Gagal terhubung untuk ${number}. Kemungkinan di-logout. Hapus folder sesi dan scan ulang.`);
                     fs.rmSync(SESSIONS_DIR + number, { recursive: true, force: true });
                     if (!connectionOpened) {
                         reject(new Error(`Logged out for ${number}`));
@@ -70,8 +81,8 @@ const connectToWhatsApp = (number) => {
 };
 
 const startScheduler = () => {
-    const minInterval = 5 * 60 * 1000;
-    const maxInterval = 15 * 60 * 1000;
+    const minInterval = 1 * 1000;
+    const maxInterval = 60 * 1000;
 
     const scheduleNextConversation = () => {
         const interval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
@@ -129,6 +140,7 @@ const initiateConversation = async () => {
 
     try {
         const messageToSend = conversation.type === 'qa' ? conversation.question : conversation.text;
+        
         await senderSocket.sendPresenceUpdate('composing', receiverJid);
         await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
         await senderSocket.sendMessage(receiverJid, { text: messageToSend });
@@ -164,7 +176,7 @@ const run = async () => {
 
     await Promise.allSettled(connectionPromises);
 
-    console.log('[SYSTEM] Semua upaya koneksi awal telah selesai. Bot berjalan dengan sesi yang aktif.');
+    console.log('[SYSTEM] Semua upaya koneksi awal telah selesai. Bot sekarang berjalan dengan sesi yang aktif.');
 };
 
 run();
